@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 _UPDATE_REPO = "oddessax/doncalc2"
 _UPDATE_ASSET_SUFFIX = ".exe"
 
