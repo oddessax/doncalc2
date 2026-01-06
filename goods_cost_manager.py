@@ -1,11 +1,23 @@
 import json
+import os
+import platform
+import subprocess
 import sys
+import tempfile
+import threading
+import time
+import urllib.request
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from tkinter import ttk
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
+
+
+__version__ = "0.1.0"
+_UPDATE_REPO = "oddessax/doncalc2"
+_UPDATE_ASSET_SUFFIX = ".exe"
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -38,6 +50,122 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 def _default_db() -> Dict[str, Any]:
     return {"version": 1, "items": []}
+
+
+def _parse_version(s: str) -> List[int]:
+    t = str(s or "").strip()
+    if t.startswith("v") or t.startswith("V"):
+        t = t[1:]
+    out: List[int] = []
+    cur = ""
+    for ch in t:
+        if ch.isdigit():
+            cur += ch
+        else:
+            if cur:
+                out.append(int(cur))
+                cur = ""
+    if cur:
+        out.append(int(cur))
+    while len(out) < 3:
+        out.append(0)
+    return out[:3]
+
+
+def _is_newer_version(new_tag: str, current: str) -> bool:
+    return _parse_version(new_tag) > _parse_version(current)
+
+
+def _github_latest_release(repo: str) -> Optional[Dict[str, Any]]:
+    url = f"https://api.github.com/repos/{repo}/releases/latest"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": f"GoodsCostManager/{__version__}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        data = resp.read().decode("utf-8", errors="replace")
+    obj = json.loads(data)
+    if not isinstance(obj, dict):
+        return None
+    return obj
+
+
+def _pick_windows_exe_asset(release_obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    assets = release_obj.get("assets")
+    if not isinstance(assets, list):
+        return None
+    best = None
+    for a in assets:
+        if not isinstance(a, dict):
+            continue
+        name = str(a.get("name", ""))
+        if not name.lower().endswith(_UPDATE_ASSET_SUFFIX):
+            continue
+        if best is None:
+            best = a
+            continue
+        if "goodscostmanager" in name.lower() and "goodscostmanager" not in str(best.get("name", "")).lower():
+            best = a
+    return best
+
+
+def _download_file(url: str, dest_path: Path) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": f"GoodsCostManager/{__version__}"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest_path, "wb") as f:
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+
+
+def _run_windows_self_update(*, current_exe: Path, new_exe: Path) -> None:
+    tmp_dir = Path(tempfile.mkdtemp(prefix="doncalc_update_"))
+    bat_path = tmp_dir / "update.bat"
+    old_exe = current_exe.with_suffix(current_exe.suffix + ".old")
+    relaunch_args = " ".join([f'"{a}"' for a in sys.argv[1:] if a not in ("--no-update",)])
+
+    bat = "\r\n".join(
+        [
+            "@echo off",
+            "setlocal enableextensions",
+            "title GoodsCostManager Updater",
+            "timeout /t 1 /nobreak >nul",
+            ":waitloop",
+            f"tasklist /FI \"IMAGENAME eq {current_exe.name}\" 2>NUL | find /I \"{current_exe.name}\" >NUL",
+            "if %ERRORLEVEL%==0 (timeout /t 1 /nobreak >nul & goto waitloop)",
+            f"if exist \"{old_exe}\" del /f /q \"{old_exe}\"",
+            f"move /y \"{current_exe}\" \"{old_exe}\" >nul",
+            f"move /y \"{new_exe}\" \"{current_exe}\" >nul",
+            f"start \"\" \"{current_exe}\" {relaunch_args}",
+            "endlocal",
+            "exit /b 0",
+        ]
+    )
+
+    bat_path.write_text(bat, encoding="utf-8", errors="replace")
+    subprocess.Popen(
+        ["cmd.exe", "/c", str(bat_path)],
+        creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        close_fds=True,
+    )
+
+
+def _can_auto_update() -> bool:
+    if platform.system().lower() != "windows":
+        return False
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        _ = Path(sys.executable)
+    except Exception:
+        return False
+    return True
 
 
 def _normalize_db(db: Dict[str, Any]) -> Dict[str, Any]:
@@ -948,13 +1076,143 @@ class App(ttk.Frame):
         self._dirty = False
         self._details_item_for_graph: Optional[Dict[str, Any]] = None
 
+        self._update_thread: Optional[threading.Thread] = None
+        self._update_ui: Optional[tk.Toplevel] = None
+
         self.grid(row=0, column=0, sticky="nsew")
         self.master.rowconfigure(0, weight=1)
         self.master.columnconfigure(0, weight=1)
 
         self._build_menu()
         self._build_layout()
-        self._load_on_startup()
+        self._load_db()
+        self._refresh_items_tree()
+
+        self.after(800, self._start_update_check)
+
+    def _start_update_check(self):
+        if "--no-update" in sys.argv:
+            return
+        if not _can_auto_update():
+            return
+        if self._update_thread and self._update_thread.is_alive():
+            return
+
+        self._update_thread = threading.Thread(target=self._update_check_worker, daemon=True)
+        self._update_thread.start()
+
+    def _update_check_worker(self):
+        try:
+            rel = _github_latest_release(_UPDATE_REPO)
+            if not rel:
+                return
+            tag = str(rel.get("tag_name", "")).strip()
+            if not tag:
+                return
+            if not _is_newer_version(tag, __version__):
+                return
+            asset = _pick_windows_exe_asset(rel)
+            if not asset:
+                return
+            url = str(asset.get("browser_download_url", "")).strip()
+            if not url:
+                return
+
+            self.master.after(0, lambda: self._prompt_and_update(tag, url))
+        except Exception:
+            return
+
+    def _prompt_and_update(self, tag: str, url: str):
+        try:
+            if not messagebox.askyesno(
+                "Update available",
+                f"A new version ({tag}) is available.\n\nUpdate now?",
+                parent=self.master,
+            ):
+                return
+        except Exception:
+            return
+
+        current_exe = Path(sys.executable)
+        if not os.access(str(current_exe.parent), os.W_OK):
+            messagebox.showwarning(
+                "Update not possible",
+                "The app does not have permission to update itself in this folder.\n\n"
+                "Move the EXE to a writable folder (like Desktop) and try again.",
+                parent=self.master,
+            )
+            return
+
+        self._show_update_ui("Downloading update…")
+
+        t = threading.Thread(target=self._download_and_swap_worker, args=(url,), daemon=True)
+        t.start()
+
+    def _show_update_ui(self, text: str):
+        if self._update_ui and self._update_ui.winfo_exists():
+            try:
+                self._update_status_var.set(text)
+            except Exception:
+                pass
+            return
+
+        win = tk.Toplevel(self.master)
+        win.title("Updating")
+        win.resizable(False, False)
+        win.transient(self.master)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        frm = ttk.Frame(win, padding=14)
+        frm.grid(row=0, column=0, sticky="nsew")
+
+        self._update_status_var = tk.StringVar(value=text)
+        ttk.Label(frm, textvariable=self._update_status_var).grid(row=0, column=0, sticky="w")
+        pb = ttk.Progressbar(frm, mode="indeterminate", length=280)
+        pb.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        pb.start(12)
+
+        win.update_idletasks()
+        try:
+            x = self.master.winfo_rootx() + (self.master.winfo_width() // 2) - (win.winfo_width() // 2)
+            y = self.master.winfo_rooty() + (self.master.winfo_height() // 2) - (win.winfo_height() // 2)
+            win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+        self._update_ui = win
+
+    def _close_update_ui(self):
+        if self._update_ui and self._update_ui.winfo_exists():
+            try:
+                self._update_ui.destroy()
+            except Exception:
+                pass
+        self._update_ui = None
+
+    def _download_and_swap_worker(self, url: str):
+        current_exe = Path(sys.executable)
+        tmp_dir = Path(tempfile.mkdtemp(prefix="doncalc_download_"))
+        new_exe = tmp_dir / (current_exe.stem + ".new.exe")
+        try:
+            self.master.after(0, lambda: self._update_status_var.set("Downloading update…"))
+            _download_file(url, new_exe)
+
+            if not new_exe.exists() or new_exe.stat().st_size < 1024:
+                raise RuntimeError("Downloaded file is invalid")
+
+            self.master.after(0, lambda: self._update_status_var.set("Installing update…"))
+            _run_windows_self_update(current_exe=current_exe, new_exe=new_exe)
+            self.master.after(0, self.master.destroy)
+        except Exception:
+            self.master.after(0, self._close_update_ui)
+            self.master.after(
+                0,
+                lambda: messagebox.showerror(
+                    "Update failed",
+                    "The update could not be installed. You can try again later.",
+                    parent=self.master,
+                ),
+            )
 
     def _build_menu(self):
         m = tk.Menu(self.master)
