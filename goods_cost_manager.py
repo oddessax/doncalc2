@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 _UPDATE_REPO = "oddessax/doncalc2"
 _UPDATE_ASSET_SUFFIX = ".exe"
 
@@ -1296,6 +1296,9 @@ class App(ttk.Frame):
 
         self.items_tree.bind("<<TreeviewSelect>>", lambda e: self._refresh_details())
         self.items_tree.bind("<Double-1>", lambda e: self.edit_selected_item())
+
+    def _load_db(self):
+        self._load_on_startup()
 
     def _load_on_startup(self):
         if self.db_path.exists():
