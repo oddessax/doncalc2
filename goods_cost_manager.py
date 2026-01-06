@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 _UPDATE_REPO = "oddessax/doncalc2"
 _UPDATE_ASSET_SUFFIX = ".exe"
 
@@ -50,6 +50,154 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 def _default_db() -> Dict[str, Any]:
     return {"version": 1, "items": []}
+
+
+def _default_ingredients_db() -> Dict[str, Any]:
+    return {"version": 1, "ingredients": []}
+
+
+def _default_packaging_db() -> Dict[str, Any]:
+    return {"version": 1, "packaging": []}
+
+
+def _normalize_ingredient(ing: Dict[str, Any]) -> Dict[str, Any]:
+    ing_id = ing.get("id") or str(uuid4())
+    name = str(ing.get("name", "")).strip()
+    pack_qty = _safe_float(ing.get("pack_qty", 0.0), 0.0)
+    pack_unit = str(ing.get("pack_unit", "")).strip()
+    pack_cost = _safe_float(ing.get("pack_cost", 0.0), 0.0)
+    gst_mode = str(ing.get("gst_mode", "ex")).strip().lower() or "ex"
+    if gst_mode not in ("free", "inc", "ex"):
+        gst_mode = "ex"
+    return {
+        "id": str(ing_id),
+        "name": name,
+        "pack_qty": pack_qty,
+        "pack_unit": pack_unit,
+        "pack_cost": pack_cost,
+        "gst_mode": gst_mode,
+    }
+
+
+def _normalize_ingredients_db(db: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(db, dict):
+        return _default_ingredients_db()
+    ings = db.get("ingredients")
+    if not isinstance(ings, list):
+        ings = []
+    out_ings = []
+    for ing in ings:
+        if not isinstance(ing, dict):
+            continue
+        out_ings.append(_normalize_ingredient(ing))
+    return {"version": int(db.get("version", 1) or 1), "ingredients": out_ings}
+
+
+def _normalize_packaging(pkg: Dict[str, Any]) -> Dict[str, Any]:
+    pkg_id = pkg.get("id") or str(uuid4())
+    name = str(pkg.get("name", "")).strip()
+    pack_qty = _safe_float(pkg.get("pack_qty", 0.0), 0.0)
+    pack_cost = _safe_float(pkg.get("pack_cost", 0.0), 0.0)
+    gst_mode = str(pkg.get("gst_mode", "ex")).strip().lower() or "ex"
+    if gst_mode not in ("free", "inc", "ex"):
+        gst_mode = "ex"
+    return {
+        "id": str(pkg_id),
+        "name": name,
+        "pack_qty": pack_qty,
+        "pack_unit": "each",
+        "pack_cost": pack_cost,
+        "gst_mode": gst_mode,
+    }
+
+
+def _normalize_packaging_db(db: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(db, dict):
+        return _default_packaging_db()
+    pkgs = db.get("packaging")
+    if not isinstance(pkgs, list):
+        pkgs = []
+    out_pkgs = []
+    for pkg in pkgs:
+        if not isinstance(pkg, dict):
+            continue
+        out_pkgs.append(_normalize_packaging(pkg))
+    return {"version": int(db.get("version", 1) or 1), "packaging": out_pkgs}
+
+
+_INGREDIENTS_BY_ID: Dict[str, Dict[str, Any]] = {}
+
+_PACKAGING_BY_ID: Dict[str, Dict[str, Any]] = {}
+
+
+def _set_ingredient_library(ingredients: List[Dict[str, Any]]):
+    global _INGREDIENTS_BY_ID
+    m: Dict[str, Dict[str, Any]] = {}
+    for ing in ingredients or []:
+        if not isinstance(ing, dict):
+            continue
+        ingn = _normalize_ingredient(ing)
+        m[str(ingn.get("id"))] = ingn
+    _INGREDIENTS_BY_ID = m
+
+
+def _set_packaging_library(packaging: List[Dict[str, Any]]):
+    global _PACKAGING_BY_ID
+    m: Dict[str, Dict[str, Any]] = {}
+    for pkg in packaging or []:
+        if not isinstance(pkg, dict):
+            continue
+        pkgn = _normalize_packaging(pkg)
+        m[str(pkgn.get("id"))] = pkgn
+    _PACKAGING_BY_ID = m
+
+
+def _get_ingredient(ingredient_id: str) -> Optional[Dict[str, Any]]:
+    if not ingredient_id:
+        return None
+    return _INGREDIENTS_BY_ID.get(str(ingredient_id))
+
+
+def _get_packaging(packaging_id: str) -> Optional[Dict[str, Any]]:
+    if not packaging_id:
+        return None
+    return _PACKAGING_BY_ID.get(str(packaging_id))
+
+
+def _ingredients_sorted() -> List[Dict[str, Any]]:
+    return sorted(list(_INGREDIENTS_BY_ID.values()), key=lambda x: str(x.get("name", "")).lower())
+
+
+def _packaging_sorted() -> List[Dict[str, Any]]:
+    return sorted(list(_PACKAGING_BY_ID.values()), key=lambda x: str(x.get("name", "")).lower())
+
+
+def _resolve_material_line(m: Dict[str, Any]) -> Dict[str, Any]:
+    ing_id = str(m.get("ingredient_id", "") or "").strip()
+    ing = _get_ingredient(ing_id)
+    if not ing:
+        return m
+    out = dict(m)
+    out["ingredient_id"] = ing_id
+    out["name"] = ing.get("name", out.get("name", ""))
+    for k in ("pack_qty", "pack_unit", "pack_cost", "gst_mode"):
+        if k in ing:
+            out[k] = ing.get(k)
+    return out
+
+
+def _resolve_packaging_line(p: Dict[str, Any]) -> Dict[str, Any]:
+    pkg_id = str(p.get("packaging_id", "") or "").strip()
+    pkg = _get_packaging(pkg_id)
+    if not pkg:
+        return p
+    out = dict(p)
+    out["packaging_id"] = pkg_id
+    out["name"] = pkg.get("name", out.get("name", ""))
+    for k in ("pack_qty", "pack_unit", "pack_cost", "gst_mode"):
+        if k in pkg:
+            out[k] = pkg.get(k)
+    return out
 
 
 def _parse_version(s: str) -> List[int]:
@@ -197,6 +345,7 @@ def _normalize_item(it: Dict[str, Any]) -> Dict[str, Any]:
     for m in materials:
         if not isinstance(m, dict):
             continue
+        ingredient_id = str(m.get("ingredient_id", "") or "").strip()
         legacy_qty = _safe_float(m.get("qty", 0.0), 0.0)
         legacy_unit = str(m.get("unit", "")).strip()
         legacy_unit_cost = _safe_float(m.get("unit_cost", 0.0), 0.0)
@@ -219,6 +368,38 @@ def _normalize_item(it: Dict[str, Any]) -> Dict[str, Any]:
         norm_materials.append(
             {
                 "name": str(m.get("name", "")).strip(),
+                "ingredient_id": ingredient_id,
+                "pack_qty": pack_qty,
+                "pack_unit": pack_unit,
+                "pack_cost": pack_cost,
+                "used_qty": used_qty,
+                "used_unit": used_unit,
+                "gst_mode": gst_mode,
+            }
+        )
+
+    packaging = it.get("packaging")
+    if not isinstance(packaging, list):
+        packaging = []
+    norm_packaging = []
+    for p in packaging:
+        if not isinstance(p, dict):
+            continue
+        packaging_id = str(p.get("packaging_id", "") or "").strip()
+        used_qty = _safe_float(p.get("used_qty", 0.0), 0.0)
+        used_unit = str(p.get("used_unit", "each")).strip() or "each"
+        pack_qty = _safe_float(p.get("pack_qty", 0.0), 0.0)
+        pack_unit = str(p.get("pack_unit", "each")).strip() or "each"
+        pack_cost = _safe_float(p.get("pack_cost", 0.0), 0.0)
+        gst_mode = str(p.get("gst_mode", "ex")).strip().lower() or "ex"
+        if gst_mode not in ("free", "inc", "ex"):
+            gst_mode = "ex"
+        if used_qty <= 0:
+            used_qty = 1.0
+        norm_packaging.append(
+            {
+                "name": str(p.get("name", "")).strip(),
+                "packaging_id": packaging_id,
                 "pack_qty": pack_qty,
                 "pack_unit": pack_unit,
                 "pack_cost": pack_cost,
@@ -262,6 +443,7 @@ def _normalize_item(it: Dict[str, Any]) -> Dict[str, Any]:
         "unit_name": unit_name,
         "batch_size": batch_size,
         "materials": norm_materials,
+        "packaging": norm_packaging,
         "labour": {"mode": mode, "percent": percent, "tasks": norm_tasks},
         "pricing": {"rrp_inc_gst": rrp_inc_gst},
     }
@@ -273,7 +455,22 @@ def _materials_total(item: Dict[str, Any]) -> float:
         if not isinstance(m, dict):
             continue
         total += _material_line_cost_ex_gst(m)
+    for p in item.get("packaging", []) or []:
+        if not isinstance(p, dict):
+            continue
+        total += _packaging_line_cost_ex_gst(p)
     return total
+
+
+def _packaging_line_cost_ex_gst(p: Dict[str, Any]) -> float:
+    pp = _resolve_packaging_line(p)
+    pack_qty = _safe_float(pp.get("pack_qty", 0.0), 0.0)
+    used_qty = _safe_float(pp.get("used_qty", 0.0), 0.0)
+    if pack_qty <= 0:
+        return 0.0
+    pack_cost_ex = _pack_cost_ex_gst(pp)
+    ratio = used_qty / pack_qty
+    return max(0.0, pack_cost_ex * ratio)
 
 
 def _norm_unit(u: str) -> str:
@@ -328,22 +525,24 @@ def _convert_qty(qty: float, from_unit: str, to_unit: str) -> Optional[float]:
 
 
 def _pack_cost_ex_gst(m: Dict[str, Any]) -> float:
-    cost = _safe_float(m.get("pack_cost", 0.0), 0.0)
-    mode = str(m.get("gst_mode", "ex")).strip().lower() or "ex"
+    mm = _resolve_material_line(m)
+    cost = _safe_float(mm.get("pack_cost", 0.0), 0.0)
+    mode = str(mm.get("gst_mode", "ex")).strip().lower() or "ex"
     if mode == "inc":
         return cost / 1.1 if cost > 0 else 0.0
     return cost
 
 
 def _material_line_cost_ex_gst(m: Dict[str, Any]) -> float:
-    pack_qty = _safe_float(m.get("pack_qty", 0.0), 0.0)
-    used_qty = _safe_float(m.get("used_qty", 0.0), 0.0)
+    mm = _resolve_material_line(m)
+    pack_qty = _safe_float(mm.get("pack_qty", 0.0), 0.0)
+    used_qty = _safe_float(mm.get("used_qty", 0.0), 0.0)
     if pack_qty <= 0:
         return 0.0
 
-    pack_unit = str(m.get("pack_unit", "")).strip()
-    used_unit = str(m.get("used_unit", "")).strip()
-    pack_cost_ex = _pack_cost_ex_gst(m)
+    pack_unit = str(mm.get("pack_unit", "")).strip()
+    used_unit = str(mm.get("used_unit", "")).strip()
+    pack_cost_ex = _pack_cost_ex_gst(mm)
 
     pack_unit_n = _norm_unit(pack_unit)
     used_unit_n = _norm_unit(used_unit)
@@ -470,6 +669,7 @@ class LineDialog(tk.Toplevel):
 class MaterialDialog(LineDialog):
     def __init__(self, parent: tk.Widget, initial: Optional[Dict[str, Any]] = None):
         super().__init__(parent, "Material")
+        self.var_ingredient = tk.StringVar(value=str((initial or {}).get("ingredient_id", "")))
         self.var_name = tk.StringVar(value=(initial or {}).get("name", ""))
         self.var_pack_qty = tk.StringVar(value=str((initial or {}).get("pack_qty", 0.0)))
         self.var_pack_unit = tk.StringVar(value=(initial or {}).get("pack_unit", ""))
@@ -481,33 +681,60 @@ class MaterialDialog(LineDialog):
             self.var_gst_mode.set("ex")
         self.var_preview = tk.StringVar(value="")
 
-        ttk.Label(self._body, text="Name").grid(row=0, column=0, sticky="w")
-        ttk.Entry(self._body, textvariable=self.var_name, width=40).grid(row=1, column=0, sticky="ew")
+        ingredient_choices = ["(Custom)"]
+        self._ingredient_id_by_label: Dict[str, str] = {}
+        for ing in _ingredients_sorted():
+            iid = str(ing.get("id", ""))
+            nm = str(ing.get("name", "")).strip() or "(unnamed)"
+            label = nm
+            if label in self._ingredient_id_by_label:
+                label = f"{label} ({iid[:8]})"
+            ingredient_choices.append(label)
+            self._ingredient_id_by_label[label] = iid
+        cur_label = "(Custom)"
+        if self.var_ingredient.get().strip():
+            for k, v in self._ingredient_id_by_label.items():
+                if v == self.var_ingredient.get().strip():
+                    cur_label = k
+                    break
+        self.var_ingredient_label = tk.StringVar(value=cur_label)
+
+        top = ttk.Frame(self._body)
+        top.grid(row=0, column=0, sticky="ew")
+        top.columnconfigure(0, weight=1)
+        ttk.Label(top, text="Ingredient (optional)").grid(row=0, column=0, sticky="w")
+        ing_cb = ttk.Combobox(top, textvariable=self.var_ingredient_label, values=ingredient_choices, state="readonly")
+        ing_cb.grid(row=1, column=0, sticky="ew")
+
+        ttk.Label(self._body, text="Name").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        ttk.Entry(self._body, textvariable=self.var_name, width=40).grid(row=3, column=0, sticky="ew")
 
         pack = ttk.LabelFrame(self._body, text="Pack / purchase", padding=10)
-        pack.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        pack.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         pack.columnconfigure(0, weight=1)
         pack.columnconfigure(1, weight=1)
         pack.columnconfigure(2, weight=1)
 
         ttk.Label(pack, text="Pack qty").grid(row=0, column=0, sticky="w")
-        ttk.Entry(pack, textvariable=self.var_pack_qty, width=12).grid(row=1, column=0, sticky="ew")
+        self._pack_qty_entry = ttk.Entry(pack, textvariable=self.var_pack_qty, width=12)
+        self._pack_qty_entry.grid(row=1, column=0, sticky="ew")
         ttk.Label(pack, text="Pack unit").grid(row=0, column=1, sticky="w", padx=(10, 0))
         units = ["g", "kg", "ml", "l", "each"]
-        pack_unit_cb = ttk.Combobox(pack, textvariable=self.var_pack_unit, values=units, width=10, state="readonly")
-        pack_unit_cb.grid(row=1, column=1, sticky="w", padx=(10, 0))
+        self._pack_unit_cb = ttk.Combobox(pack, textvariable=self.var_pack_unit, values=units, width=10, state="readonly")
+        self._pack_unit_cb.grid(row=1, column=1, sticky="w", padx=(10, 0))
         ttk.Label(pack, text="Pack cost").grid(row=0, column=2, sticky="w", padx=(10, 0))
-        ttk.Entry(pack, textvariable=self.var_pack_cost, width=12).grid(row=1, column=2, sticky="ew", padx=(10, 0))
+        self._pack_cost_entry = ttk.Entry(pack, textvariable=self.var_pack_cost, width=12)
+        self._pack_cost_entry.grid(row=1, column=2, sticky="ew", padx=(10, 0))
 
         gst_row = ttk.Frame(pack)
         gst_row.grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Label(gst_row, text="GST mode").pack(side="left")
-        gst_combo = ttk.Combobox(gst_row, textvariable=self.var_gst_mode, values=["ex", "inc", "free"], width=8, state="readonly")
-        gst_combo.pack(side="left", padx=(10, 0))
+        self._gst_combo = ttk.Combobox(gst_row, textvariable=self.var_gst_mode, values=["ex", "inc", "free"], width=8, state="readonly")
+        self._gst_combo.pack(side="left", padx=(10, 0))
         ttk.Label(gst_row, text="ex=exclusive, inc=inclusive, free=GST-free").pack(side="left", padx=(10, 0))
 
         used = ttk.LabelFrame(self._body, text="Used in this product", padding=10)
-        used.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        used.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         used.columnconfigure(0, weight=1)
         used.columnconfigure(1, weight=1)
 
@@ -517,7 +744,7 @@ class MaterialDialog(LineDialog):
         used_unit_cb = ttk.Combobox(used, textvariable=self.var_used_unit, values=units, width=10, state="readonly")
         used_unit_cb.grid(row=1, column=1, sticky="w", padx=(10, 0))
 
-        ttk.Label(self._body, textvariable=self.var_preview).grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(self._body, textvariable=self.var_preview).grid(row=6, column=0, sticky="w", pady=(10, 0))
 
         ttk.Button(self._buttons, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(self._buttons, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
@@ -532,7 +759,10 @@ class MaterialDialog(LineDialog):
         self.var_used_qty.trace_add("write", lambda *a: self._refresh_preview())
         self.var_used_unit.trace_add("write", lambda *a: self._refresh_preview())
         self.var_gst_mode.trace_add("write", lambda *a: self._refresh_preview())
+        self.var_ingredient_label.trace_add("write", lambda *a: self._on_ingredient_selected())
         self.after(60, self._refresh_preview)
+
+        self.after(70, self._on_ingredient_selected)
 
     def _focus_first(self):
         for child in self._body.winfo_children():
@@ -546,6 +776,8 @@ class MaterialDialog(LineDialog):
         self.close()
 
     def _ok(self):
+        ing_label = self.var_ingredient_label.get().strip()
+        ingredient_id = self._ingredient_id_by_label.get(ing_label, "")
         name = self.var_name.get().strip()
         pack_qty = _safe_float(self.var_pack_qty.get(), 0.0)
         pack_unit = self.var_pack_unit.get().strip()
@@ -557,6 +789,7 @@ class MaterialDialog(LineDialog):
             gst_mode = "ex"
         self.result = {
             "name": name,
+            "ingredient_id": ingredient_id,
             "pack_qty": pack_qty,
             "pack_unit": pack_unit,
             "pack_cost": pack_cost,
@@ -566,8 +799,39 @@ class MaterialDialog(LineDialog):
         }
         self.close()
 
+    def _on_ingredient_selected(self):
+        ing_label = self.var_ingredient_label.get().strip()
+        ingredient_id = self._ingredient_id_by_label.get(ing_label, "")
+        self.var_ingredient.set(ingredient_id)
+        ing = _get_ingredient(ingredient_id)
+        if not ing:
+            try:
+                self._pack_qty_entry.configure(state="normal")
+                self._pack_cost_entry.configure(state="normal")
+                self._pack_unit_cb.configure(state="readonly")
+                self._gst_combo.configure(state="readonly")
+            except Exception:
+                pass
+            self._refresh_preview()
+            return
+
+        self.var_name.set(str(ing.get("name", "")))
+        self.var_pack_qty.set(str(ing.get("pack_qty", 0.0)))
+        self.var_pack_unit.set(str(ing.get("pack_unit", "each")))
+        self.var_pack_cost.set(str(ing.get("pack_cost", 0.0)))
+        self.var_gst_mode.set(str(ing.get("gst_mode", "ex")) or "ex")
+        try:
+            self._pack_qty_entry.configure(state="disabled")
+            self._pack_cost_entry.configure(state="disabled")
+            self._pack_unit_cb.configure(state="disabled")
+            self._gst_combo.configure(state="disabled")
+        except Exception:
+            pass
+        self._refresh_preview()
+
     def _refresh_preview(self):
         m = {
+            "ingredient_id": self.var_ingredient.get().strip(),
             "pack_qty": _safe_float(self.var_pack_qty.get(), 0.0),
             "pack_unit": self.var_pack_unit.get().strip(),
             "pack_cost": _safe_float(self.var_pack_cost.get(), 0.0),
@@ -577,6 +841,457 @@ class MaterialDialog(LineDialog):
         }
         line = _material_line_cost_ex_gst(m)
         pack_ex = _pack_cost_ex_gst(m)
+        self.var_preview.set(f"Line cost (ex GST): {_format_money(line)} | Pack cost ex GST: {_format_money(pack_ex)}")
+
+
+class IngredientDialog(LineDialog):
+    def __init__(self, parent: tk.Widget, initial: Optional[Dict[str, Any]] = None):
+        super().__init__(parent, "Ingredient")
+        self.ing_id = str((initial or {}).get("id", "") or "")
+        self.var_name = tk.StringVar(value=(initial or {}).get("name", ""))
+        self.var_pack_qty = tk.StringVar(value=str((initial or {}).get("pack_qty", 0.0)))
+        self.var_pack_unit = tk.StringVar(value=(initial or {}).get("pack_unit", "each"))
+        self.var_pack_cost = tk.StringVar(value=str((initial or {}).get("pack_cost", 0.0)))
+        self.var_gst_mode = tk.StringVar(value=str((initial or {}).get("gst_mode", "ex")) or "ex")
+        if self.var_gst_mode.get() not in ("free", "inc", "ex"):
+            self.var_gst_mode.set("ex")
+        self.var_preview = tk.StringVar(value="")
+
+        ttk.Label(self._body, text="Name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(self._body, textvariable=self.var_name, width=44).grid(row=1, column=0, sticky="ew")
+
+        grid = ttk.Frame(self._body)
+        grid.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+        grid.columnconfigure(2, weight=1)
+
+        ttk.Label(grid, text="Pack qty").grid(row=0, column=0, sticky="w")
+        ttk.Entry(grid, textvariable=self.var_pack_qty, width=12).grid(row=1, column=0, sticky="ew")
+        ttk.Label(grid, text="Pack unit").grid(row=0, column=1, sticky="w", padx=(10, 0))
+        units = ["g", "kg", "ml", "l", "each"]
+        ttk.Combobox(grid, textvariable=self.var_pack_unit, values=units, width=10, state="readonly").grid(
+            row=1, column=1, sticky="w", padx=(10, 0)
+        )
+        ttk.Label(grid, text="Pack cost").grid(row=0, column=2, sticky="w", padx=(10, 0))
+        ttk.Entry(grid, textvariable=self.var_pack_cost, width=12).grid(row=1, column=2, sticky="ew", padx=(10, 0))
+
+        gst_row = ttk.Frame(self._body)
+        gst_row.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(gst_row, text="GST mode").pack(side="left")
+        ttk.Combobox(gst_row, textvariable=self.var_gst_mode, values=["ex", "inc", "free"], width=8, state="readonly").pack(
+            side="left", padx=(10, 0)
+        )
+
+        ttk.Label(self._body, textvariable=self.var_preview).grid(row=4, column=0, sticky="w", pady=(10, 0))
+
+        ttk.Button(self._buttons, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(self._buttons, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+        self.bind("<Escape>", lambda e: self._cancel())
+        self.bind("<Return>", lambda e: self._ok())
+
+        self.var_pack_qty.trace_add("write", lambda *a: self._refresh_preview())
+        self.var_pack_cost.trace_add("write", lambda *a: self._refresh_preview())
+        self.var_gst_mode.trace_add("write", lambda *a: self._refresh_preview())
+        self.after(60, self._refresh_preview)
+
+    def _cancel(self):
+        self.result = None
+        self.close()
+
+    def _ok(self):
+        name = self.var_name.get().strip()
+        pack_qty = _safe_float(self.var_pack_qty.get(), 0.0)
+        pack_unit = self.var_pack_unit.get().strip()
+        pack_cost = _safe_float(self.var_pack_cost.get(), 0.0)
+        gst_mode = (self.var_gst_mode.get() or "ex").strip().lower()
+        if gst_mode not in ("free", "inc", "ex"):
+            gst_mode = "ex"
+        out = {"id": self.ing_id or str(uuid4()), "name": name, "pack_qty": pack_qty, "pack_unit": pack_unit, "pack_cost": pack_cost, "gst_mode": gst_mode}
+        self.result = _normalize_ingredient(out)
+        self.close()
+
+    def _refresh_preview(self):
+        ing = {
+            "pack_qty": _safe_float(self.var_pack_qty.get(), 0.0),
+            "pack_unit": self.var_pack_unit.get().strip(),
+            "pack_cost": _safe_float(self.var_pack_cost.get(), 0.0),
+            "gst_mode": (self.var_gst_mode.get() or "ex").strip().lower(),
+        }
+        pack_ex = _pack_cost_ex_gst(ing)
+        self.var_preview.set(f"Pack cost ex GST: {_format_money(pack_ex)}")
+
+
+class PackagingDialog(LineDialog):
+    def __init__(self, parent: tk.Widget, initial: Optional[Dict[str, Any]] = None):
+        super().__init__(parent, "Packaging")
+        self.pkg_id = str((initial or {}).get("id", "") or "")
+        self.var_name = tk.StringVar(value=(initial or {}).get("name", ""))
+        self.var_pack_qty = tk.StringVar(value=str((initial or {}).get("pack_qty", 0.0)))
+        self.var_pack_cost = tk.StringVar(value=str((initial or {}).get("pack_cost", 0.0)))
+        self.var_gst_mode = tk.StringVar(value=str((initial or {}).get("gst_mode", "ex")) or "ex")
+        if self.var_gst_mode.get() not in ("free", "inc", "ex"):
+            self.var_gst_mode.set("ex")
+        self.var_preview = tk.StringVar(value="")
+
+        ttk.Label(self._body, text="Name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(self._body, textvariable=self.var_name, width=44).grid(row=1, column=0, sticky="ew")
+
+        grid = ttk.Frame(self._body)
+        grid.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+
+        ttk.Label(grid, text="Pack qty (each)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(grid, textvariable=self.var_pack_qty, width=12).grid(row=1, column=0, sticky="ew")
+        ttk.Label(grid, text="Pack cost").grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ttk.Entry(grid, textvariable=self.var_pack_cost, width=12).grid(row=1, column=1, sticky="ew", padx=(10, 0))
+
+        gst_row = ttk.Frame(self._body)
+        gst_row.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(gst_row, text="GST mode").pack(side="left")
+        ttk.Combobox(gst_row, textvariable=self.var_gst_mode, values=["ex", "inc", "free"], width=8, state="readonly").pack(
+            side="left", padx=(10, 0)
+        )
+
+        ttk.Label(self._body, textvariable=self.var_preview).grid(row=4, column=0, sticky="w", pady=(10, 0))
+
+        ttk.Button(self._buttons, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(self._buttons, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+        self.bind("<Escape>", lambda e: self._cancel())
+        self.bind("<Return>", lambda e: self._ok())
+
+        self.var_pack_qty.trace_add("write", lambda *a: self._refresh_preview())
+        self.var_pack_cost.trace_add("write", lambda *a: self._refresh_preview())
+        self.var_gst_mode.trace_add("write", lambda *a: self._refresh_preview())
+        self.after(60, self._refresh_preview)
+
+    def _cancel(self):
+        self.result = None
+        self.close()
+
+    def _ok(self):
+        name = self.var_name.get().strip()
+        pack_qty = _safe_float(self.var_pack_qty.get(), 0.0)
+        pack_cost = _safe_float(self.var_pack_cost.get(), 0.0)
+        gst_mode = (self.var_gst_mode.get() or "ex").strip().lower()
+        if gst_mode not in ("free", "inc", "ex"):
+            gst_mode = "ex"
+        out = {"id": self.pkg_id or str(uuid4()), "name": name, "pack_qty": pack_qty, "pack_cost": pack_cost, "gst_mode": gst_mode}
+        self.result = _normalize_packaging(out)
+        self.close()
+
+    def _refresh_preview(self):
+        pkg = {"pack_cost": _safe_float(self.var_pack_cost.get(), 0.0), "gst_mode": (self.var_gst_mode.get() or "ex").strip().lower()}
+        pack_ex = _pack_cost_ex_gst(pkg)
+        self.var_preview.set(f"Pack cost ex GST: {_format_money(pack_ex)}")
+
+
+class IngredientManager(tk.Toplevel):
+    def __init__(self, parent: tk.Widget, *, items: List[Dict[str, Any]]):
+        super().__init__(parent)
+        self.title("Ingredients")
+        self.minsize(740, 420)
+        self.transient(parent.winfo_toplevel())
+        self._grabbed = False
+        self.after(0, self._try_grab)
+
+        self.items: List[Dict[str, Any]] = [
+            _normalize_ingredient(i) for i in (items or []) if isinstance(i, dict)
+        ]
+        self.result: Optional[List[Dict[str, Any]]] = None
+
+        root = ttk.Frame(self, padding=12)
+        root.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(root, columns=("name", "pack", "cost", "gst"), show="headings")
+        for col, label, w in [("name", "Name", 260), ("pack", "Pack", 180), ("cost", "Pack cost", 120), ("gst", "GST", 80)]:
+            self.tree.heading(col, text=label)
+            self.tree.column(col, width=w, anchor="w")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        root.rowconfigure(0, weight=1)
+        root.columnconfigure(0, weight=1)
+        sb = ttk.Scrollbar(root, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.grid(row=0, column=1, sticky="ns")
+
+        actions = ttk.Frame(root)
+        actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(actions, text="Add", command=self._add).pack(side="left")
+        ttk.Button(actions, text="Edit", command=self._edit).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Remove", command=self._remove).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Close", command=self._close_ok).pack(side="right")
+
+        self.tree.bind("<Double-1>", lambda e: self._edit())
+        self._refresh_tree()
+
+    def _try_grab(self):
+        if self._grabbed:
+            return
+        try:
+            self.wait_visibility()
+            self.grab_set()
+            self._grabbed = True
+        except tk.TclError:
+            self.after(25, self._try_grab)
+
+    def _selected_id(self) -> Optional[str]:
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        return sel[0]
+
+    def _refresh_tree(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        for ing in sorted(self.items, key=lambda x: str(x.get("name", "")).lower()):
+            pack = f"{ing.get('pack_qty', 0)} {ing.get('pack_unit', '')}".strip()
+            self.tree.insert("", "end", iid=str(ing.get("id")), values=(ing.get("name", ""), pack, _format_money(_safe_float(ing.get("pack_cost", 0.0), 0.0)), ing.get("gst_mode", "ex")))
+
+    def _add(self):
+        dlg = IngredientDialog(self)
+        self.wait_window(dlg)
+        if dlg.result is None:
+            return
+        self.items.append(dlg.result)
+        self._refresh_tree()
+
+    def _edit(self):
+        iid = self._selected_id()
+        if not iid:
+            return
+        cur = next((i for i in self.items if str(i.get("id")) == str(iid)), None)
+        if not cur:
+            return
+        dlg = IngredientDialog(self, initial=cur)
+        self.wait_window(dlg)
+        if dlg.result is None:
+            return
+        for idx, it in enumerate(self.items):
+            if str(it.get("id")) == str(iid):
+                self.items[idx] = dlg.result
+                break
+        self._refresh_tree()
+
+    def _remove(self):
+        iid = self._selected_id()
+        if not iid:
+            return
+        if not messagebox.askyesno("Remove", "Remove selected ingredient?", parent=self):
+            return
+        self.items = [i for i in self.items if str(i.get("id")) != str(iid)]
+        self._refresh_tree()
+
+    def _close_ok(self):
+        self.result = self.items
+        try:
+            if self._grabbed:
+                self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+
+class PackagingManager(tk.Toplevel):
+    def __init__(self, parent: tk.Widget, *, items: List[Dict[str, Any]]):
+        super().__init__(parent)
+        self.title("Packaging")
+        self.minsize(720, 420)
+        self.transient(parent.winfo_toplevel())
+        self._grabbed = False
+        self.after(0, self._try_grab)
+
+        self.items: List[Dict[str, Any]] = [
+            _normalize_packaging(i) for i in (items or []) if isinstance(i, dict)
+        ]
+        self.result: Optional[List[Dict[str, Any]]] = None
+
+        root = ttk.Frame(self, padding=12)
+        root.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(root, columns=("name", "pack", "cost", "gst"), show="headings")
+        for col, label, w in [("name", "Name", 300), ("pack", "Pack qty", 140), ("cost", "Pack cost", 120), ("gst", "GST", 80)]:
+            self.tree.heading(col, text=label)
+            self.tree.column(col, width=w, anchor="w")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        root.rowconfigure(0, weight=1)
+        root.columnconfigure(0, weight=1)
+        sb = ttk.Scrollbar(root, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.grid(row=0, column=1, sticky="ns")
+
+        actions = ttk.Frame(root)
+        actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(actions, text="Add", command=self._add).pack(side="left")
+        ttk.Button(actions, text="Edit", command=self._edit).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Remove", command=self._remove).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Close", command=self._close_ok).pack(side="right")
+
+        self.tree.bind("<Double-1>", lambda e: self._edit())
+        self._refresh_tree()
+
+    def _try_grab(self):
+        if self._grabbed:
+            return
+        try:
+            self.wait_visibility()
+            self.grab_set()
+            self._grabbed = True
+        except tk.TclError:
+            self.after(25, self._try_grab)
+
+    def _selected_id(self) -> Optional[str]:
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        return sel[0]
+
+    def _refresh_tree(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        for pkg in sorted(self.items, key=lambda x: str(x.get("name", "")).lower()):
+            self.tree.insert(
+                "",
+                "end",
+                iid=str(pkg.get("id")),
+                values=(
+                    pkg.get("name", ""),
+                    _format_money(_safe_float(pkg.get("pack_qty", 0.0), 0.0)),
+                    _format_money(_safe_float(pkg.get("pack_cost", 0.0), 0.0)),
+                    pkg.get("gst_mode", "ex"),
+                ),
+            )
+
+    def _add(self):
+        dlg = PackagingDialog(self)
+        self.wait_window(dlg)
+        if dlg.result is None:
+            return
+        self.items.append(dlg.result)
+        self._refresh_tree()
+
+    def _edit(self):
+        pid = self._selected_id()
+        if not pid:
+            return
+        cur = next((i for i in self.items if str(i.get("id")) == str(pid)), None)
+        if not cur:
+            return
+        dlg = PackagingDialog(self, initial=cur)
+        self.wait_window(dlg)
+        if dlg.result is None:
+            return
+        for idx, it in enumerate(self.items):
+            if str(it.get("id")) == str(pid):
+                self.items[idx] = dlg.result
+                break
+        self._refresh_tree()
+
+    def _remove(self):
+        pid = self._selected_id()
+        if not pid:
+            return
+        if not messagebox.askyesno("Remove", "Remove selected packaging?", parent=self):
+            return
+        self.items = [i for i in self.items if str(i.get("id")) != str(pid)]
+        self._refresh_tree()
+
+    def _close_ok(self):
+        self.result = self.items
+        try:
+            if self._grabbed:
+                self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+
+class PackagingLineDialog(LineDialog):
+    def __init__(self, parent: tk.Widget, initial: Optional[Dict[str, Any]] = None):
+        super().__init__(parent, "Packaging line")
+        self.var_packaging = tk.StringVar(value=str((initial or {}).get("packaging_id", "")))
+        self.var_used_qty = tk.StringVar(value=str((initial or {}).get("used_qty", 1.0)))
+        self.var_preview = tk.StringVar(value="")
+
+        choices = ["(Select)"]
+        self._pkg_id_by_label: Dict[str, str] = {}
+        for pkg in _packaging_sorted():
+            pid = str(pkg.get("id", ""))
+            nm = str(pkg.get("name", "")).strip() or "(unnamed)"
+            label = nm
+            if label in self._pkg_id_by_label:
+                label = f"{label} ({pid[:8]})"
+            choices.append(label)
+            self._pkg_id_by_label[label] = pid
+
+        cur_label = "(Select)"
+        if self.var_packaging.get().strip():
+            for k, v in self._pkg_id_by_label.items():
+                if v == self.var_packaging.get().strip():
+                    cur_label = k
+                    break
+        self.var_packaging_label = tk.StringVar(value=cur_label)
+
+        ttk.Label(self._body, text="Packaging").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(self._body, textvariable=self.var_packaging_label, values=choices, state="readonly").grid(
+            row=1, column=0, sticky="ew"
+        )
+
+        used = ttk.Frame(self._body)
+        used.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        used.columnconfigure(0, weight=1)
+        ttk.Label(used, text="Used qty (each)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(used, textvariable=self.var_used_qty, width=12).grid(row=1, column=0, sticky="w")
+
+        ttk.Label(self._body, textvariable=self.var_preview).grid(row=3, column=0, sticky="w", pady=(10, 0))
+
+        ttk.Button(self._buttons, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(self._buttons, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+        self.bind("<Escape>", lambda e: self._cancel())
+        self.bind("<Return>", lambda e: self._ok())
+
+        self.var_packaging_label.trace_add("write", lambda *a: self._refresh_preview())
+        self.var_used_qty.trace_add("write", lambda *a: self._refresh_preview())
+        self.after(60, self._refresh_preview)
+
+    def _cancel(self):
+        self.result = None
+        self.close()
+
+    def _ok(self):
+        pid = self._pkg_id_by_label.get(self.var_packaging_label.get().strip(), "")
+        pkg = _get_packaging(pid)
+        if not pkg:
+            messagebox.showerror("Missing", "Please select a packaging item.", parent=self)
+            return
+        used_qty = _safe_float(self.var_used_qty.get(), 0.0)
+        if used_qty <= 0:
+            used_qty = 1.0
+        self.result = {
+            "name": str(pkg.get("name", "")),
+            "packaging_id": pid,
+            "pack_qty": _safe_float(pkg.get("pack_qty", 0.0), 0.0),
+            "pack_unit": "each",
+            "pack_cost": _safe_float(pkg.get("pack_cost", 0.0), 0.0),
+            "used_qty": used_qty,
+            "used_unit": "each",
+            "gst_mode": str(pkg.get("gst_mode", "ex")) or "ex",
+        }
+        self.close()
+
+    def _refresh_preview(self):
+        pid = self._pkg_id_by_label.get(self.var_packaging_label.get().strip(), "")
+        pkg = _get_packaging(pid)
+        if not pkg:
+            self.var_preview.set("")
+            return
+        used_qty = _safe_float(self.var_used_qty.get(), 0.0)
+        line = _packaging_line_cost_ex_gst({"packaging_id": pid, "used_qty": used_qty})
+        pack_ex = _pack_cost_ex_gst(pkg)
         self.var_preview.set(f"Line cost (ex GST): {_format_money(line)} | Pack cost ex GST: {_format_money(pack_ex)}")
 
 
@@ -693,13 +1408,16 @@ class ItemEditor(tk.Toplevel):
         root.rowconfigure(1, weight=1)
 
         self.materials_tab = ttk.Frame(self.nb, padding=10)
+        self.packaging_tab = ttk.Frame(self.nb, padding=10)
         self.labour_tab = ttk.Frame(self.nb, padding=10)
         self.pricing_tab = ttk.Frame(self.nb, padding=10)
         self.nb.add(self.materials_tab, text="Materials")
+        self.nb.add(self.packaging_tab, text="Packaging")
         self.nb.add(self.labour_tab, text="Labour")
         self.nb.add(self.pricing_tab, text="Pricing")
 
         self._build_materials_tab()
+        self._build_packaging_tab()
         self._build_labour_tab()
         self._build_pricing_tab()
 
@@ -770,6 +1488,41 @@ class ItemEditor(tk.Toplevel):
 
         self.materials_tree.bind("<Double-1>", lambda e: self._edit_material())
         self._refresh_materials_tree()
+
+    def _build_packaging_tab(self):
+        self.packaging_tab.rowconfigure(0, weight=1)
+        self.packaging_tab.columnconfigure(0, weight=1)
+
+        self.packaging_tree = ttk.Treeview(
+            self.packaging_tab,
+            columns=("name", "used", "pack", "pack_cost", "gst", "line_cost"),
+            show="headings",
+            height=10,
+        )
+        for col, label, w in [
+            ("name", "Name", 260),
+            ("used", "Used", 120),
+            ("pack", "Pack", 120),
+            ("pack_cost", "Pack cost", 110),
+            ("gst", "GST", 70),
+            ("line_cost", "Line cost (ex)", 120),
+        ]:
+            self.packaging_tree.heading(col, text=label)
+            self.packaging_tree.column(col, width=w, anchor="w")
+        self.packaging_tree.grid(row=0, column=0, sticky="nsew")
+
+        sb = ttk.Scrollbar(self.packaging_tab, orient="vertical", command=self.packaging_tree.yview)
+        self.packaging_tree.configure(yscrollcommand=sb.set)
+        sb.grid(row=0, column=1, sticky="ns")
+
+        actions = ttk.Frame(self.packaging_tab)
+        actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(actions, text="Add", command=self._add_packaging).pack(side="left")
+        ttk.Button(actions, text="Edit", command=self._edit_packaging).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Remove", command=self._remove_packaging).pack(side="left", padx=(8, 0))
+
+        self.packaging_tree.bind("<Double-1>", lambda e: self._edit_packaging())
+        self._refresh_packaging_tree()
 
     def _build_labour_tab(self):
         self.labour_tab.rowconfigure(2, weight=1)
@@ -863,19 +1616,20 @@ class ItemEditor(tk.Toplevel):
         for i in self.materials_tree.get_children():
             self.materials_tree.delete(i)
         for idx, m in enumerate(self.item.get("materials", []) or []):
+            mm = _resolve_material_line(m)
             used_qty = _safe_float(m.get("used_qty", 0.0), 0.0)
             used_unit = str(m.get("used_unit", "")).strip()
-            pack_qty = _safe_float(m.get("pack_qty", 0.0), 0.0)
-            pack_unit = str(m.get("pack_unit", "")).strip()
-            pack_cost = _safe_float(m.get("pack_cost", 0.0), 0.0)
-            gst_mode = str(m.get("gst_mode", "ex")).strip().lower() or "ex"
+            pack_qty = _safe_float(mm.get("pack_qty", 0.0), 0.0)
+            pack_unit = str(mm.get("pack_unit", "")).strip()
+            pack_cost = _safe_float(mm.get("pack_cost", 0.0), 0.0)
+            gst_mode = str(mm.get("gst_mode", "ex")).strip().lower() or "ex"
             line_cost = _material_line_cost_ex_gst(m)
             self.materials_tree.insert(
                 "",
                 "end",
                 iid=str(idx),
                 values=(
-                    m.get("name", ""),
+                    mm.get("name", ""),
                     f"{used_qty} {used_unit}".strip(),
                     f"{pack_qty} {pack_unit}".strip(),
                     _format_money(pack_cost),
@@ -883,6 +1637,73 @@ class ItemEditor(tk.Toplevel):
                     _format_money(line_cost),
                 ),
             )
+
+    def _refresh_packaging_tree(self):
+        for i in self.packaging_tree.get_children():
+            self.packaging_tree.delete(i)
+        for idx, p in enumerate(self.item.get("packaging", []) or []):
+            pp = _resolve_packaging_line(p)
+            used_qty = _safe_float(p.get("used_qty", 0.0), 0.0)
+            used_unit = str(p.get("used_unit", "each")).strip() or "each"
+            pack_qty = _safe_float(pp.get("pack_qty", 0.0), 0.0)
+            pack_unit = str(pp.get("pack_unit", "each")).strip() or "each"
+            pack_cost = _safe_float(pp.get("pack_cost", 0.0), 0.0)
+            gst_mode = str(pp.get("gst_mode", "ex")).strip().lower() or "ex"
+            line_cost = _packaging_line_cost_ex_gst(p)
+            self.packaging_tree.insert(
+                "",
+                "end",
+                iid=str(idx),
+                values=(
+                    pp.get("name", ""),
+                    f"{used_qty} {used_unit}".strip(),
+                    f"{pack_qty} {pack_unit}".strip(),
+                    _format_money(pack_cost),
+                    gst_mode,
+                    _format_money(line_cost),
+                ),
+            )
+
+    def _selected_packaging_index(self) -> Optional[int]:
+        sel = self.packaging_tree.selection()
+        if not sel:
+            return None
+        return _safe_int(sel[0], -1)
+
+    def _add_packaging(self):
+        dlg = PackagingLineDialog(self)
+        self.wait_window(dlg)
+        if dlg.result is None:
+            return
+        self.item.setdefault("packaging", []).append(dlg.result)
+        self._refresh_packaging_tree()
+        self._refresh_summary()
+
+    def _edit_packaging(self):
+        idx = self._selected_packaging_index()
+        if idx is None:
+            return
+        pkgs = self.item.get("packaging", []) or []
+        if idx < 0 or idx >= len(pkgs):
+            return
+        dlg = PackagingLineDialog(self, initial=pkgs[idx])
+        self.wait_window(dlg)
+        if dlg.result is None:
+            return
+        pkgs[idx] = dlg.result
+        self._refresh_packaging_tree()
+        self._refresh_summary()
+
+    def _remove_packaging(self):
+        idx = self._selected_packaging_index()
+        if idx is None:
+            return
+        pkgs = self.item.get("packaging", []) or []
+        if idx < 0 or idx >= len(pkgs):
+            return
+        del pkgs[idx]
+        self._refresh_packaging_tree()
+        self._refresh_summary()
 
     def _selected_material_index(self) -> Optional[int]:
         sel = self.materials_tree.selection()
@@ -1072,7 +1893,11 @@ class App(ttk.Frame):
 
         base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
         self.db_path = base_dir / "goods_data.json"
+        self.ingredients_path = base_dir / "ingredient.json"
+        self.packaging_path = base_dir / "packaging.json"
         self.db: Dict[str, Any] = _default_db()
+        self.ingredients_db: Dict[str, Any] = _default_ingredients_db()
+        self.packaging_db: Dict[str, Any] = _default_packaging_db()
         self._dirty = False
         self._details_item_for_graph: Optional[Dict[str, Any]] = None
 
@@ -1085,6 +1910,7 @@ class App(ttk.Frame):
 
         self._build_menu()
         self._build_layout()
+        self._load_libraries()
         self._load_db()
         self._refresh_items_tree()
 
@@ -1223,7 +2049,68 @@ class App(ttk.Frame):
         filem.add_separator()
         filem.add_command(label="Exit", command=self.master.destroy)
         m.add_cascade(label="File", menu=filem)
+
+        libm = tk.Menu(m, tearoff=0)
+        libm.add_command(label="Ingredients...", command=self.manage_ingredients)
+        libm.add_command(label="Packaging...", command=self.manage_packaging)
+        m.add_cascade(label="Library", menu=libm)
+
         self.master.config(menu=m)
+
+    def _load_libraries(self):
+        try:
+            if self.ingredients_path.exists():
+                obj = json.loads(self.ingredients_path.read_text(encoding="utf-8"))
+                self.ingredients_db = _normalize_ingredients_db(obj)
+            else:
+                self.ingredients_db = _default_ingredients_db()
+                self.ingredients_path.write_text(json.dumps(self.ingredients_db, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            self.ingredients_db = _default_ingredients_db()
+        try:
+            if self.packaging_path.exists():
+                obj = json.loads(self.packaging_path.read_text(encoding="utf-8"))
+                self.packaging_db = _normalize_packaging_db(obj)
+            else:
+                self.packaging_db = _default_packaging_db()
+                self.packaging_path.write_text(json.dumps(self.packaging_db, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            self.packaging_db = _default_packaging_db()
+
+        _set_ingredient_library(self.ingredients_db.get("ingredients", []) or [])
+        _set_packaging_library(self.packaging_db.get("packaging", []) or [])
+
+    def _save_libraries(self):
+        try:
+            self.ingredients_path.write_text(json.dumps(self.ingredients_db, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+        try:
+            self.packaging_path.write_text(json.dumps(self.packaging_db, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    def manage_ingredients(self):
+        dlg = IngredientManager(self.master, items=self.ingredients_db.get("ingredients", []) or [])
+        self.master.wait_window(dlg)
+        if dlg.result is None:
+            return
+        self.ingredients_db = _normalize_ingredients_db({"version": 1, "ingredients": dlg.result})
+        _set_ingredient_library(self.ingredients_db.get("ingredients", []) or [])
+        self._save_libraries()
+        self._refresh_items_tree()
+        self._refresh_details()
+
+    def manage_packaging(self):
+        dlg = PackagingManager(self.master, items=self.packaging_db.get("packaging", []) or [])
+        self.master.wait_window(dlg)
+        if dlg.result is None:
+            return
+        self.packaging_db = _normalize_packaging_db({"version": 1, "packaging": dlg.result})
+        _set_packaging_library(self.packaging_db.get("packaging", []) or [])
+        self._save_libraries()
+        self._refresh_items_tree()
+        self._refresh_details()
 
     def _build_layout(self):
         outer = ttk.Frame(self)
@@ -1541,22 +2428,42 @@ class App(ttk.Frame):
         if mats:
             lines.append("Materials:")
             for m in mats:
+                mm = _resolve_material_line(m)
                 used_qty = _safe_float(m.get("used_qty", 0.0), 0.0)
                 used_unit = str(m.get("used_unit", "")).strip()
-                pack_qty = _safe_float(m.get("pack_qty", 0.0), 0.0)
-                pack_unit = str(m.get("pack_unit", "")).strip()
-                pack_cost = _safe_float(m.get("pack_cost", 0.0), 0.0)
-                gst_mode = str(m.get("gst_mode", "ex")).strip().lower() or "ex"
+                pack_qty = _safe_float(mm.get("pack_qty", 0.0), 0.0)
+                pack_unit = str(mm.get("pack_unit", "")).strip()
+                pack_cost = _safe_float(mm.get("pack_cost", 0.0), 0.0)
+                gst_mode = str(mm.get("gst_mode", "ex")).strip().lower() or "ex"
                 line_cost_ex = _material_line_cost_ex_gst(m)
                 pack_cost_ex = _pack_cost_ex_gst(m)
 
                 used_str = f"{used_qty} {used_unit}".strip()
                 pack_str = f"{pack_qty} {pack_unit}".strip()
                 lines.append(
-                    f"- {m.get('name','')}: used {used_str} of {pack_str} @ { _format_money(pack_cost) } ({gst_mode}) => { _format_money(line_cost_ex) } ex GST"
+                    f"- {mm.get('name','')}: used {used_str} of {pack_str} @ { _format_money(pack_cost) } ({gst_mode}) => { _format_money(line_cost_ex) } ex GST"
                 )
                 if gst_mode == "inc":
                     lines.append(f"  pack cost ex GST: { _format_money(pack_cost_ex) }")
+
+        pkgs = itn.get("packaging", []) or []
+        if pkgs:
+            lines.append("")
+            lines.append("Packaging:")
+            for p in pkgs:
+                pp = _resolve_packaging_line(p)
+                used_qty = _safe_float(p.get("used_qty", 0.0), 0.0)
+                used_unit = str(p.get("used_unit", "each")).strip() or "each"
+                pack_qty = _safe_float(pp.get("pack_qty", 0.0), 0.0)
+                pack_unit = str(pp.get("pack_unit", "each")).strip() or "each"
+                pack_cost = _safe_float(pp.get("pack_cost", 0.0), 0.0)
+                gst_mode = str(pp.get("gst_mode", "ex")).strip().lower() or "ex"
+                line_cost_ex = _packaging_line_cost_ex_gst(p)
+                used_str = f"{used_qty} {used_unit}".strip()
+                pack_str = f"{pack_qty} {pack_unit}".strip()
+                lines.append(
+                    f"- {pp.get('name','')}: used {used_str} of {pack_str} @ { _format_money(pack_cost) } ({gst_mode}) => { _format_money(line_cost_ex) } ex GST"
+                )
         tasks = (itn.get("labour", {}) or {}).get("tasks", []) or []
         if tasks:
             lines.append("")

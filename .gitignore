@@ -7,3 +7,5 @@ build/
 dist/
 *.spec
 goods_data.json
+ingredient.json
+packaging.json
